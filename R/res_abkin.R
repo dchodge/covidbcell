@@ -1,7 +1,8 @@
 
 # This script contains the functions to plot the antibody kinetics and the transition time for the antibody production following vaccination with the second dose.
 # The functions are used in the main script `main.R` to generate the figures for the manuscript.
-#' Plot antibody kinetics
+#' Code to plot Figure 4 of manuscript, the antibody kinetics
+
 #' @param stanfit The stanfit object
 #' @param fig_folder The folder where the data is stored
 #' @export

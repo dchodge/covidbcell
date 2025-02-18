@@ -192,7 +192,7 @@ plot_cal_crps_ind <- function() {
             labs(x = "", y = "Continuous Ranked Probability Score\n (CRPS)", fill = "", color = "") +        
              theme(strip.text.x = element_text(size = 24), axis.text = element_text(size = 20), axis.title.y = element_text(size = 22), 
               title = element_text(size = 20), legend.text = element_text(size = 20))   
-    ggsave(here::here("outputs", "figs", "post_pred", "fig1B.png"), height = 6)
+    ggsave(here::here("outputs", "figs", "post_pred", "fig1B.png"), height = 10, width = 15 )
 
 
     p1 <- df_crps_all %>% filter(antigen == "Spike model") %>%
@@ -222,7 +222,115 @@ plot_cal_crps_ind <- function() {
                 ggtitle(paste0("Model fits for calibration data" , " Ancestral RBD",  " antigen") ) + 
                 david_theme_A() + theme(axis.text.x = element_blank())
     p1 / p2
-    ggsave(here::here("outputs", "figs", "post_pred", "figS1.png"), height = 15)
+    ggsave(here::here("outputs", "figs", "post_pred", "figS1.png"), height = 15, width = 15)
+
+}
+
+
+#' Plot the population-level trajectories with the CRPS calculated
+plot_cal_rmse_ind <- function() {
+
+    # Get the calibration data
+    data_i_all_s <- get_data_ind("nih_wu_s") %>% mutate(antigen = "Spike model")
+    data_i_all_rbd <- get_data_ind("nih_wu_rbd") %>% mutate(antigen = "RBD model")
+    data_i_all <- bind_rows(data_i_all_s, data_i_all_rbd) %>% deanonymize_pid() %>% 
+        group_by(antigen, state, PID) %>% mutate(t_id = row_number()) %>%
+        rename(data_value = value)
+
+    state_names <-  c("Memory B-cell conc.", "Plasmablast conc.", "sVNT to ancestral variant")
+    state_id_data <- c("y_hat_1", "y_hat_2", "y_hat_3")
+    names(state_names) <- state_id_data
+
+    stanfit_s <- readRDS(file = here::here("outputs", "stanfit", paste0("nih_vac_wu_s_i", ".RDS")) )
+    stanfit_rbd <- readRDS(file = here::here("outputs", "stanfit", paste0("nih_vac_wu_rbd_i", ".RDS")) )
+
+    y_hat_dist_s <- stanfit_s$draws(c("y_hat")) %>% spread_draws(y_hat[n, t, s]) %>% rename(PID = n, t_id = t) %>%
+        mutate(PID = factor(PID, levels = 1:41)) %>%  filter(s %in% c(1, 2, 3, 6)) %>%
+            pivot_wider(names_from = "s", values_from = c("y_hat")) %>% 
+            rename(y_hat_1 = `1`, y_hat_2 = `2`, y_hat_3 = `3`, y_hat_6 = `6`) %>%
+            mutate( y_hat_3 = y_hat_3 + y_hat_6, .keep = "unused") %>% 
+            pivot_longer(y_hat_1:y_hat_3, names_to = "state", values_to = "value") %>%
+            mutate(state = recode(state, !!!state_names)) %>% mutate(antigen = "Spike model")
+
+    y_hat_dist_rbd <- stanfit_rbd$draws(c("y_hat")) %>% spread_draws(y_hat[n, t, s]) %>% rename(PID = n, t_id = t) %>%
+        mutate(PID = factor(PID, levels = 1:41)) %>%  filter(s %in% c(1, 2, 3, 6)) %>%
+            pivot_wider(names_from = "s", values_from = c("y_hat")) %>% 
+            rename(y_hat_1 = `1`, y_hat_2 = `2`, y_hat_3 = `3`, y_hat_6 = `6`) %>%
+            mutate( y_hat_3 = y_hat_3 + y_hat_6, .keep = "unused") %>% 
+            pivot_longer(y_hat_1:y_hat_3, names_to = "state", values_to = "value") %>%
+            mutate(state = recode(state, !!!state_names)) %>% mutate(antigen = "RBD model")
+    y_hat_dist <- bind_rows(y_hat_dist_s, y_hat_dist_rbd) 
+    data_i_all %>% head
+
+    y_hat_dist_data <- data_i_all %>% left_join(y_hat_dist %>% filter(!is.na(value))) %>% ungroup %>% 
+        mutate(key = paste(PID, t_id, sep = "_")) %>%
+        mutate(key = factor(key, levels = unique(key))) %>%
+        mutate(key = as.numeric(key)) 
+
+    df_rmse_all <- map_df(as.character(state_names),
+        function(state_str) {
+            #  "Memory B-cell conc."               "Plasmablast conc." "sVNT to ancestral variant (log)" 
+           # bcell_mat <- y_hat_dist_data %>% ungroup %>% filter(!is.na(i), !is.na(data_value)) %>% select(.draw, PID, i, antigen, day_data, state, value, data_value) %>%
+           #  state_str <- "sVNT to ancestral variant (log)"
+            y_hat_dist_data_state <- y_hat_dist_data %>% filter(state == state_str) 
+                
+            mat_model_post <- y_hat_dist_data_state %>% select(antigen, key, PID, t, value) %>% pull(value) %>% matrix(ncol = 4000, byrow = TRUE) %>% t
+            df_model_data <- y_hat_dist_data_state %>% select(antigen, key, PID, t, data_value) %>% unique 
+            vec_model_data <- df_model_data %>% pull(data_value)
+
+            pred_mean <- colMeans(mat_model_post)
+            rmse_score <- sqrt((vec_model_data - pred_mean)^2)
+
+            df_model_data$rmse_score <- rmse_score
+            df_model_post_summary <- y_hat_dist_data_state %>% select(key, PID, t, value) %>% group_by(PID, key, t) %>% mean_qi(value)
+
+            left_join(df_model_post_summary, df_model_data) %>% mutate(state = state_str)
+        }
+    )  %>% mutate(VisitN = cut(t, breaks = c(-1, 13, 22, 300), labels = c("2–13 days", "14–21 days", "67–210 days") ) ) %>%
+         mutate(VisitN = factor(VisitN, levels = c("2–13 days", "14–21 days", "67–210 days")) ) %>% filter(!is.na(VisitN)) %>%
+        mutate(antigen = factor(antigen, levels = c("Spike model", "RBD model"))) 
+
+    df_rmse_all %>% 
+        ggplot() + 
+            geom_boxplot(aes(x = state, y = rmse_score, fill = antigen), position = position_dodge(0.8), alpha = 0.3) + 
+            theme_bw() +
+            scale_fill_manual(values = c(color_study_A, color_study_B)) + 
+            david_theme_B() + 
+            theme(legend.position = "top") + 
+            labs(x = "", y = "Root Mean Squared Error\n (RMSE)", fill = "", color = "") +        
+             theme(strip.text.x = element_text(size = 24), axis.text = element_text(size = 20), axis.title.y = element_text(size = 22), 
+              title = element_text(size = 20), legend.text = element_text(size = 20))   
+    ggsave(here::here("outputs", "figs", "post_pred", "fig1B_RMSE.png"), height = 10, width = 15 )
+
+
+    p1 <- df_rmse_all %>% filter(antigen == "Spike model") %>%
+            ggplot() + 
+                geom_linerange(aes(PID, y = value, ymin = .lower, ymax = .upper), size = 1) + 
+                geom_point(aes(PID, y = value), color = "black", size = 3)  +
+                geom_point(aes(PID, y = data_value, fill = rmse_score), alpha = 0.7, shape = 22, color = "white", size = 3)  +
+                facet_nested(VisitN ~ state, scales = "free") + theme_bw() +
+                labs(x = "Person ID", y = "Value", fill = "Root Mean Squared Error (RMSE)", color = "") + 
+                scale_color_manual(labels = c( "Model fit"), values = c("black") ) + 
+                # have low values red and high values gray in gradient
+                scale_fill_continuous( low = "red", high = "gray")+ 
+                theme(legend.position = "bottom") + 
+                ggtitle(paste0("Model fits to calibration data for " , "Ancestral spike",  " antigen") ) + 
+                david_theme_A() + theme(axis.text.x = element_blank())
+    p2 <- df_rmse_all %>% filter(antigen == "RBD model") %>%
+            ggplot() + 
+                geom_linerange(aes(PID, y = value, ymin = .lower, ymax = .upper), size = 1) + 
+                geom_point(aes(PID, y = value), color = "black", size = 3)  +
+                geom_point(aes(PID, y = data_value, fill = rmse_score), alpha = 0.7, shape = 22, color = "white", size = 3)  +
+                facet_nested(VisitN ~ state, scales = "free") + theme_bw() +
+                labs(x = "Person ID", y = "Value", fill = "Root Mean Squared Error (RMSE)", color = "") + 
+                scale_color_manual(labels = c( "Model fit"), values = c("black") ) + 
+                # have low values red and high values gray in gradient
+                scale_fill_continuous( low = "red", high = "gray")+ 
+                theme(legend.position = "bottom") + 
+                ggtitle(paste0("Model fits for calibration data" , " Ancestral RBD",  " antigen") ) + 
+                david_theme_A() + theme(axis.text.x = element_blank())
+    p1 / p2
+    ggsave(here::here("outputs", "figs", "post_pred", "figS1_RMSE.png"), height = 15, width = 15)
 
 }
 

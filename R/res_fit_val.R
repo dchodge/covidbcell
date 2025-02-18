@@ -157,7 +157,7 @@ plot_val_crps_ind <- function() {
             labs(x = "", y = "Continuous Ranked Probability Score\n (CRPS)", fill = "", color = "") +        
              theme(strip.text.x = element_text(size = 24), axis.text = element_text(size = 20), axis.title.y = element_text(size = 22), 
               title = element_text(size = 20), legend.text = element_text(size = 20))   
-    ggsave(here::here("outputs", "figs", "valid", "fig1D.png"), height = 6)
+    ggsave(here::here("outputs", "figs", "valid", "fig1D.png"), height = 10, width = 15)
 
 
     p1 <- df_crps_all %>% filter(antigen == "Spike model") %>% deanonymize_pid %>%
@@ -187,8 +187,101 @@ plot_val_crps_ind <- function() {
                 ggtitle(paste0("Model predictions for validation (unseen) " , "Ancestral RBD",  " antigen") ) + 
                 david_theme_A()
     p1 / p2
-    ggsave(here::here("outputs", "figs", "valid", "figS2.png"), height = 15)
+    ggsave(here::here("outputs", "figs", "valid", "figS2.png"), height = 15, width = 15)
 }
+
+
+#' Plot the population-level trajectories with the MRSE scores
+plot_val_rmse_ind <- function() {
+
+   df_uncert_ind_s <- readRDS(here::here("outputs", "stanfit",  paste0("traj_val_",  "s", ".RDS"))) %>% mutate(antigen = "Spike model")
+    df_uncert_ind_rbd <- readRDS(here::here("outputs", "stanfit",  paste0("traj_val_",  "rbd", ".RDS"))) %>% mutate(antigen = "RBD model")
+    df_uncert_ind <- bind_rows(df_uncert_ind_s, df_uncert_ind_rbd) %>% filter(state %in% c("B", "P", "A")) %>%
+        mutate(state_variable = recode(state, B = "Memory B-cell conc.", P = "Plasmablast conc.", A = "sVNT to ancestral variant"))
+
+    # Get the calibration data
+    data_i_all_s <- get_data_ind("sid_wu_s") %>% mutate(antigen = "Spike model")
+    data_i_all_rbd <- get_data_ind("sid_wu_rbd") %>% mutate(antigen = "RBD model")
+    data_i_all <- bind_rows(data_i_all_s, data_i_all_rbd)
+
+    df_uncert_pop <- df_uncert_ind %>% filter(
+                (state_variable == "Memory B-cell conc." & time < 80) |
+                (state_variable == "Plasmablast conc." & time < 80) |
+                (state_variable == "sVNT to ancestral variant" & time < 240)
+                ) %>%
+                group_by(time, state_variable, antigen) 
+
+
+    state_names <-  c("Memory B-cell conc.", "Plasmablast conc.", "sVNT to ancestral variant")
+
+    fit_val_compare <- data_i_all %>% rename(data_value = value) %>% left_join(df_uncert_pop %>% select(!state) %>% rename(t = time, state = state_variable))
+    N <- fit_val_compare$PID %>% unique %>% length
+     df_rmse_all <- map_df(as.character(state_names),
+        function(state_str) {
+                        #  "Memory B-cell conc."               "Plasmablast conc." "sVNT to ancestral variant (log)" 
+           # bcell_mat <- y_hat_dist_data %>% ungroup %>% filter(!is.na(i), !is.na(data_value)) %>% select(.draw, PID, i, antigen, day_data, state, value, data_value) %>%
+           #  state_str <- "sVNT to ancestral variant (log)"
+            fit_val_compare_state <- fit_val_compare %>% filter(state == state_str) 
+                
+            mat_model_post <- fit_val_compare_state %>% select(antigen, PID, t, value) %>% pull(value) %>% matrix(nrow = 2 * N, byrow = TRUE) %>% t
+            df_model_data <- fit_val_compare_state %>% select(antigen, PID, t, data_value) %>% unique 
+            vec_model_data <- df_model_data %>% pull(data_value)
+
+            pred_mean <- colMeans(mat_model_post)
+            rmse_score <- sqrt((vec_model_data - pred_mean)^2)
+
+            df_model_data$rmse_score <- rmse_score
+        
+            df_model_post_summary <- fit_val_compare_state %>% select(PID, t, value) %>% group_by(PID, t) %>% mean_qi(value)
+
+            left_join(df_model_post_summary, df_model_data) %>% mutate(state = state_str)
+        }
+    ) 
+
+    df_rmse_all %>%
+        mutate(antigen = factor(antigen, levels = c("Spike model", "RBD model"))) %>% 
+        ggplot() + 
+            geom_boxplot(aes(x = state, y = rmse_score, fill = antigen), position = position_dodge(0.8), alpha = 0.3) + 
+            theme_bw() +
+            scale_fill_manual(values = c(color_study_A, color_study_B)) +
+            david_theme_B() + 
+            theme(legend.position = "top") + 
+            labs(x = "", y = "Root Mean Squared Error\n (RMSE)", fill = "", color = "") +        
+             theme(strip.text.x = element_text(size = 24), axis.text = element_text(size = 20), axis.title.y = element_text(size = 22), 
+              title = element_text(size = 20), legend.text = element_text(size = 20))   
+    ggsave(here::here("outputs", "figs", "valid", "fig1D_RMSE.png"), height = 10, width = 15)
+
+
+    p1 <- df_rmse_all %>% filter(antigen == "Spike model") %>% deanonymize_pid %>%
+            ggplot() + 
+                geom_linerange(aes(PID, y = value, ymin = .lower, ymax = .upper), size = 1) + 
+                geom_point(aes(PID, y = value), color = "black", size = 3)  +
+                geom_point(aes(PID, y = data_value, fill = rmse_score), alpha = 0.7, shape = 22, color = "white", size = 3)  +
+                facet_nested(vars(state), scales = "free") + theme_bw() +
+                labs(x = "Person ID", y = "Value", fill = "Root Mean Squared Error (RMSE)", color = "") + 
+                scale_color_manual(labels = c( "Model fit"), values = c("black") ) + 
+                # have low values red and high values gray in gradient
+                scale_fill_continuous( low = "red", high = "gray")+ 
+                theme(legend.position = "bottom") + 
+                ggtitle(paste0("Model predictions for validation (unseen) " , "Ancestral spike",  " antigen") ) + 
+                david_theme_A()
+    p2 <- df_rmse_all %>% filter(antigen == "RBD model") %>% deanonymize_pid %>%
+            ggplot() + 
+                geom_linerange(aes(PID, y = value, ymin = .lower, ymax = .upper), size = 1) + 
+                geom_point(aes(PID, y = value), color = "black", size = 3)  +
+                geom_point(aes(PID, y = data_value, fill = rmse_score), alpha = 0.7, shape = 22, color = "white", size = 3)  +
+                facet_nested(vars(state), scales = "free") + theme_bw() +
+                labs(x = "Person ID", y = "Value", fill = "Root Mean Squared Error (RMSE)", color = "") + 
+                scale_color_manual(labels = c( "Model fit"), values = c("black") ) + 
+                # have low values red and high values gray in gradient
+                scale_fill_continuous( low = "red", high = "gray")+ 
+                theme(legend.position = "bottom") + 
+                ggtitle(paste0("Model predictions for validation (unseen) " , "Ancestral RBD",  " antigen") ) + 
+                david_theme_A()
+    p1 / p2
+    ggsave(here::here("outputs", "figs", "valid", "figS2_RMSE.png"), height = 15, width = 15)
+}
+
 
 #' Plot the individual-level trajectories for the validations data given the stanfit object for each individual
 plot_val_traj_ind <- function() {
